@@ -28,15 +28,13 @@ PARAMETERS = {
     "spline": "pchip",  # "pchip" or "cubic"; cubic can fail overshoot validation.
 }
 GEOMETRY = "machined"  # Finished plate STEP + OBJ; "centerlines" exports curves.
-CUT_SAMPLE_SPACING = 0.01  # Inches; smaller gives a finer cutter-envelope model.
-CUTTER_SEGMENTS = 32  # Multiple of 4; higher gives rounder cutter footprints.
+CUT_MODEL = "spline-pocket"  # Rectangular rows with one spline floor per row.
 MESH_TOLERANCE_MM = 0.05  # OBJ detail; smaller gives a finer mesh.
 
 
 def main():
     args = [str(IMAGE), "--out-dir", str(OUTPUT_DIR), "--geometry", GEOMETRY,
-            "--cut-sample-spacing", str(CUT_SAMPLE_SPACING),
-            "--cutter-segments", str(CUTTER_SEGMENTS),
+            "--cut-model", CUT_MODEL,
             "--mesh-tolerance-mm", str(MESH_TOLERANCE_MM)]
     for name, value in PARAMETERS.items():
         args.extend(["--" + name.replace("_", "-"), str(value)])

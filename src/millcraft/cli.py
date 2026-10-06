@@ -34,10 +34,12 @@ def parser():
     result.add_argument("--with-plate", action="store_true", help="In centerlines mode, also export a separate uncut plate")
     result.add_argument("--geometry", choices=("machined", "centerlines"), default="machined",
                         help="Finished plate solid, or the original curve-only workflow")
+    result.add_argument("--cut-model", choices=("spline-pocket", "cutter-envelope"), default="spline-pocket",
+                        help="Rectangular single-spline pockets, or rounded cutter envelopes")
     result.add_argument("--cut-sample-spacing", type=float, default=0.01,
-                        help="Maximum X spacing for the cutter envelope in inches")
+                        help="In cutter-envelope mode, maximum envelope X spacing in inches")
     result.add_argument("--cutter-segments", type=int, default=32,
-                        help="Circular cutter polygon resolution; multiple of 4, from 8 to 128")
+                        help="In cutter-envelope mode, polygon resolution; multiple of 4, from 8 to 128")
     result.add_argument("--mesh-tolerance-mm", type=float, default=0.05,
                         help="OBJ tessellation deflection in millimeters")
     return result
@@ -83,7 +85,8 @@ def generate(args, progress=None):
             from .machining import export_obj, machine_plate
 
             solid, machining_report = machine_plate(
-                rows, parameters, args.cut_sample_spacing, args.cutter_segments, progress)
+                rows, parameters, args.cut_sample_spacing, args.cutter_segments, progress,
+                cut_model=args.cut_model)
             if progress:
                 progress("Exporting finished plate STEP and OBJ...")
             cq.exporters.export(solid, str(stage / "machined_plate.step"), exportType="STEP")
@@ -126,12 +129,13 @@ def generate(args, progress=None):
                            "above_surface_overshoot_mm": max(0.0, max(row.z_max_mm for row in rows)),
                            "minimum_depth_undershoot_mm": max(0.0, parameters.min_depth * MM_PER_INCH
                                                                + max(row.z_max_mm for row in rows)),
-                           "occt_conversion_checked": not machined},
+                           "occt_conversion_checked": not machined or args.cut_model == "spline-pocket"},
             "rows": [{"index": i, "y_mm": row.y_mm, "z_min_mm": row.z_min_mm,
                       "z_max_mm": row.z_max_mm, "local_overshoot_mm": row.local_overshoot_mm}
                      for i, row in enumerate(rows)],
             "tool": {"diameter_inch": parameters.tool_diameter,
-                     "use": ("vertical flat end mill swept-envelope material removal; no G-code"
+                     "use": ("pocket width" if machined and args.cut_model == "spline-pocket"
+                             else "vertical flat end mill swept-envelope material removal; no G-code"
                              if machined else "centerline metadata only")},
             "outputs": outputs,
             "packages": {name: version(name) for name in ("millcraft", "Pillow", "numpy", "scipy", "cadquery", "cadquery-ocp")},

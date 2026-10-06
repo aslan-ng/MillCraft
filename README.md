@@ -141,37 +141,51 @@ STEP export uses CadQuery's exporter and its millimeter convention. See the
 
 ## Cut model and accuracy
 
-The default `machined` mode subtracts the swept envelope of a vertical,
-cylindrical flat end mill from the plate. At each transverse section, the floor
-is the lowest spline depth anywhere under the cutter footprint. This includes
-the radius effect on slopes and rounded ends of each pass. Overlapping passes
-remove their combined volumes; separated passes leave ridges. No cutter-center
-compensation is applied to the image-derived toolpaths.
+The default `--cut-model spline-pocket` makes rectangular row pockets. Each row
+has one exact spline defining its floor, extruded uniformly across the width.
+At any X position, the floor has the same Z everywhere across that row's width.
+The top outline has straight sides and straight ends at the spline's X endpoints.
+Pocket width is `tool_diameter`; there are no rounded end caps or extensions
+beyond the row endpoints. In `main.py`, `CUT_MODEL = "spline-pocket"` selects
+this model.
 
-The envelope is approximated using linear X samples and ruled transverse
-sections around an inscribed polygonal cutter. This is a geometric approximation,
-not an exact continuous cutter sweep or a machine simulation. Settings:
+Each pocket volume has one curved floor, four planar walls, and a planar top.
+The STEP stores that floor as a single extrusion surface rather than many
+transverse cutter sections. This gives much smaller CAD files. The floor
+matches the analytically validated row spline, including its minimum/maximum
+depth settings, without another fitting or resampling step. Rows whose depth is
+zero remain uncut. A positive `min_depth` cuts all white portions as well.
+Overlapping pockets remove their combined volumes.
 
-- `CUT_SAMPLE_SPACING` / `--cut-sample-spacing`: maximum envelope X sample
-  spacing, in inches (default 0.01). Decrease it for finer depth detail.
-- `CUTTER_SEGMENTS` / `--cutter-segments`: circular footprint resolution
-  (default 32; a multiple of 4 between 8 and 128). Increase it for rounder ends.
-- `MESH_TOLERANCE_MM` / `--mesh-tolerance-mm`: OBJ tessellation deflection,
-  in millimeters (default 0.05). This affects the OBJ, not the STEP solid.
-
-The footprint's radial chord error is recorded in `report.json`; it is about
-0.0038 mm for the default 1/16-inch, 32-segment cutter. This is not a bound on
-total floor error: floor detail also depends on X spacing and transverse
-interpolation. Near Z=0, a maximum 0.0001 mm upward clearance prevents grazing
-CAD faces; rows shallower than that clearance are skipped. Deeper than 0.001 mm,
-the floor samples have no clearance offset. Reducing the envelope spacing and
-increasing cutter resolution improves the modeled sweep at additional cost.
+`MESH_TOLERANCE_MM` / `--mesh-tolerance-mm` controls OBJ tessellation deflection
+in millimeters (default 0.05). Smaller values make a finer OBJ mesh; the STEP
+floor stays the same. `report.json` records pocket dimensions, face count,
+material removed, and the closed mesh's triangle count. Volume reports use
+adaptive integration over the spline spans.
 
 The output is checked for one valid solid and positive remaining volume. The
 floor stays within the requested depth range, preserving at least plate thickness
-minus maximum depth. The cutter footprint can extend beyond the artwork bounds;
-the stock clips it at the plate edges. There are no lead-ins, linking moves,
-feeds/speeds, stock setup, tool deflection, or G-code.
+minus maximum depth. The plate edges clip any pocket extending outside the stock.
+This is a direct model of the requested pocket geometry.
+
+### Optional circular cutter model
+
+The previous rounded cutter model remains available with
+`--cut-model cutter-envelope`. It approximates the swept envelope of a vertical,
+cylindrical flat end mill. At each transverse section, the floor is the lowest
+spline depth under the cutter's circular footprint. It includes the finite-radius
+effect on slopes and rounded ends, using linear X samples and ruled sections
+around an inscribed polygonal cutter.
+
+Only in this mode, `--cut-sample-spacing` sets envelope X spacing in inches
+(default 0.01), and `--cutter-segments` sets circular footprint resolution
+(default 32; a multiple of 4 between 8 and 128). The reported radial chord error
+is not a bound on total floor error. Near Z=0, a maximum 0.0001 mm upward clearance
+avoids grazing CAD faces; rows shallower than that clearance are skipped. Floor
+samples deeper than 0.001 mm have no clearance offset. This mode is an
+approximation and generally creates larger files.
+
+Neither mode generates lead-ins, linking moves, feeds/speeds, or G-code.
 
 ## Output files
 
@@ -180,7 +194,7 @@ feeds/speeds, stock setup, tool deflection, or G-code.
 | `machined_plate.step` | One solid plate with the grooves cut into it |
 | `machined_plate.obj` | Triangle mesh tessellated from the same finished solid |
 | `samples.csv` | Sample coordinates: `row,x_mm,y_mm,z_mm` |
-| `report.json` | Parameters, units, spline validation, cut resolution, removed volume, and mesh counts |
+| `report.json` | Parameters, units, spline validation, pocket dimensions, removed volume, and mesh counts |
 | `preview.svg` | Top view colored by spline depth and representative Z profiles |
 
 The default run produces one STEP file. STEP and OBJ use the same coordinates
@@ -207,7 +221,7 @@ after a successful run; unrelated files in the folder are preserved.
 - `src/millcraft/sampling.py`: image loading, coordinate grid, and depth samples.
 - `src/millcraft/splines.py`: interpolation and analytical Z validation.
 - `src/millcraft/step.py`: exact CAD curve translation and plate/STEP export.
-- `src/millcraft/machining.py`: cutter envelopes, material removal, and OBJ export.
+- `src/millcraft/machining.py`: rectangular spline pockets, optional cutter envelopes, and OBJ export.
 - `src/millcraft/preview.py`: portable SVG depth plot.
 - `src/millcraft/cli.py`: workflow, CSV, and validation report.
 
@@ -221,6 +235,8 @@ between sample knots, local overshoot within the global depth range, and a
 safe natural cubic. The supplied-A integration test reimports the complete STEP
 and verifies 41 B-spline edges, millimeter units, every sample and analytical
 extremum, absence of solids, and the separate plate dimensions and volume in
-centerlines mode. Machining tests check capsule volume, rounded ends, finite
-cutter radius on slopes, overlapping passes, untouched stock, white rows,
-STEP solid round trips, closed oriented OBJ meshes, and failed-run preservation.
+centerlines mode. Pocket tests check rectangular outlines, straight ends,
+identical floor depths across the width, exact spline-integral removal volumes,
+shallow cuts, overlapping pockets, depth limits, and minimal face counts. Export
+tests verify STEP round trips, closed oriented OBJ meshes, and failed-run
+preservation. The optional cutter model retains capsule/rounded-end tests.

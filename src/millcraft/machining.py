@@ -1,10 +1,4 @@
-"""Approximate the swept volume of a vertical cylindrical flat end mill.
-
-At each transverse section, the floor is the minimum spline depth over the
-cutter's circular footprint. Ruled lofts discretize this envelope, retaining
-round groove ends and the effect of cutter radius on sloping paths. The cutter
-axis stays vertical; this is a geometric model, not a CNC process simulation.
-"""
+"""Single-spline row pockets and an optional cylindrical cutter-envelope model."""
 
 from collections import Counter
 import math
@@ -13,15 +7,17 @@ from pathlib import Path
 import cadquery as cq
 import numpy as np
 from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeEdge
+from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.BRepTools import BRepTools
 from OCP.Geom import Geom_BSplineCurve
+from OCP.GProp import GProp_GProps
 from OCP.TColgp import TColgp_Array1OfPnt
 from OCP.TColStd import TColStd_Array1OfInteger, TColStd_Array1OfReal
 from OCP.gp import gp_Pnt
 
 from .sampling import MM_PER_INCH
-from .step import plate_shape
+from .step import plate_shape, row_edge
 
 SURFACE_CLEARANCE_MM = 0.0001
 
@@ -88,24 +84,73 @@ def cutter_volume(row, radius_mm, spacing_mm, segments):
     return tool
 
 
+def spline_pocket_volume(row, width_mm):
+    """Extrude one exact row spline into a rectangular pocket with straight ends."""
+    half_width = width_mm / 2
+    floor = row_edge(row).translate((0, -half_width, 0))
+    first, last = floor.startPoint(), floor.endPoint()
+    top_start = cq.Vector(first.x, first.y, 1)
+    top_finish = cq.Vector(last.x, last.y, 1)
+    profile = cq.Wire.assembleEdges([
+        floor, cq.Edge.makeLine(last, top_finish),
+        cq.Edge.makeLine(top_finish, top_start), cq.Edge.makeLine(top_start, first),
+    ])
+    pocket = cq.Solid.extrudeLinear(profile, [], (0, width_mm, 0))
+    if not pocket.isValid() or len(pocket.Solids()) != 1:
+        raise RuntimeError(f"Invalid spline pocket at Y={row.y_mm:.6f} mm")
+    return pocket
+
+
+def solid_volume(shape):
+    """Use adaptive integration across spline spans for accurate volume reports."""
+    properties = GProp_GProps()
+    error = BRepGProp.VolumePropertiesGK_s(shape.wrapped, properties, 1e-9, True, True)
+    if error < 0 or not math.isfinite(properties.Mass()):
+        raise RuntimeError("Could not calculate solid volume")
+    return properties.Mass()
+
+
 def machine_plate(rows, parameters, cut_sample_spacing=0.01, cutter_segments=32,
-                  progress=None):
-    if not math.isfinite(cut_sample_spacing) or cut_sample_spacing <= 0:
-        raise ValueError("Cut sample spacing must be finite and positive (inches)")
-    if not isinstance(cutter_segments, int) or not 8 <= cutter_segments <= 128 or cutter_segments % 4:
-        raise ValueError("Cutter segments must be a multiple of 4 between 8 and 128")
+                  progress=None, cut_model="spline-pocket"):
+    if cut_model not in ("spline-pocket", "cutter-envelope"):
+        raise ValueError("Cut model must be 'spline-pocket' or 'cutter-envelope'")
     radius = parameters.tool_diameter * MM_PER_INCH / 2
-    spacing = cut_sample_spacing * MM_PER_INCH
-    section_samples = math.ceil((parameters.artwork_width * MM_PER_INCH + 2 * radius) / spacing) + 1
-    if section_samples * (cutter_segments // 2 + 1) * len(rows) > 2_000_000:
-        raise ValueError("Requested cutter discretization exceeds the 2,000,000 point limit")
+    model_report = {
+        "model": "single_spline_rectangular_pocket",
+        "approximate": False,
+        "floor_interpolation": "one exact row spline extruded uniformly across Y",
+        "pocket_width_mm": radius * 2,
+        "end_shape": "straight; at the spline X endpoints",
+        "surface_clearance_mm": 0.0,
+    }
+    if cut_model == "cutter-envelope":
+        if not math.isfinite(cut_sample_spacing) or cut_sample_spacing <= 0:
+            raise ValueError("Cut sample spacing must be finite and positive (inches)")
+        if not isinstance(cutter_segments, int) or not 8 <= cutter_segments <= 128 or cutter_segments % 4:
+            raise ValueError("Cutter segments must be a multiple of 4 between 8 and 128")
+        spacing = cut_sample_spacing * MM_PER_INCH
+        section_samples = math.ceil((parameters.artwork_width * MM_PER_INCH + 2 * radius) / spacing) + 1
+        if section_samples * (cutter_segments // 2 + 1) * len(rows) > 2_000_000:
+            raise ValueError("Requested cutter discretization exceeds the 2,000,000 point limit")
+        model_report = {
+            "model": "vertical_cylindrical_flat_end_mill_envelope",
+            "approximate": True,
+            "cut_sample_spacing_mm": spacing,
+            "cutter_segments": cutter_segments,
+            "cutter_radial_chord_error_mm": radius * (1 - math.cos(math.pi / cutter_segments)),
+            "floor_interpolation": "piecewise linear in X; ruled between transverse sections",
+            "surface_clearance_mm": SURFACE_CLEARANCE_MM,
+        }
     plate = plate_shape(parameters)
-    original_volume = plate.Volume()
-    active = [row for row in rows if row.z_min_mm < -SURFACE_CLEARANCE_MM]
+    original_volume = solid_volume(plate)
+    threshold = SURFACE_CLEARANCE_MM if cut_model == "cutter-envelope" else 1e-7
+    active = [row for row in rows if row.z_min_mm < -threshold]
     for i, row in enumerate(active, 1):
         if progress:
             progress(f"Cutting groove {i}/{len(active)}...")
-        plate = plate.cut(cutter_volume(row, radius, spacing, cutter_segments))
+        pocket = (spline_pocket_volume(row, radius * 2) if cut_model == "spline-pocket"
+                  else cutter_volume(row, radius, spacing, cutter_segments))
+        plate = plate.cut(pocket)
     if not plate.isValid() or len(plate.Solids()) != 1:
         raise RuntimeError("Machining did not produce one valid plate solid")
     plate = plate.Solids()[0]
@@ -113,22 +158,17 @@ def machine_plate(rows, parameters, cut_sample_spacing=0.01, cutter_segments=32,
     thickness = parameters.plate_thickness * MM_PER_INCH
     if bounds.zmin < -thickness - 1e-5 or bounds.zmax > 1e-5:
         raise RuntimeError("Machining changed the plate's vertical bounds")
-    final_volume = plate.Volume()
+    final_volume = solid_volume(plate)
     if final_volume > original_volume + 1e-5 or final_volume <= 0:
         raise RuntimeError("Invalid material-removal volume")
     if active and original_volume - final_volume <= 1e-7:
         raise RuntimeError("Cutter model did not remove any material")
     return plate, {
-        "model": "vertical_cylindrical_flat_end_mill_envelope",
-        "approximate": True,
-        "cut_sample_spacing_mm": spacing,
-        "cutter_segments": cutter_segments,
-        "cutter_radial_chord_error_mm": radius * (1 - math.cos(math.pi / cutter_segments)),
-        "floor_interpolation": "piecewise linear in X; ruled between transverse sections",
-        "surface_clearance_mm": SURFACE_CLEARANCE_MM,
+        **model_report,
         "active_grooves": len(active),
         "solid_valid": True,
         "solid_count": 1,
+        "faces": len(plate.Faces()),
         "original_volume_mm3": original_volume,
         "final_volume_mm3": final_volume,
         "removed_volume_mm3": original_volume - final_volume,

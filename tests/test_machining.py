@@ -7,9 +7,9 @@ from PIL import Image
 import pytest
 
 from millcraft.cli import generate, parser
-from millcraft.machining import envelope_depth, export_obj, machine_plate
-from millcraft.sampling import MM_PER_INCH, Parameters, load_grayscale, sample_image
-from millcraft.splines import interpolate_grid, interpolate_row
+from millcraft.machining import envelope_depth, export_obj, machine_plate, spline_pocket_volume
+from millcraft.sampling import MM_PER_INCH, Parameters
+from millcraft.splines import interpolate_row
 
 
 def small_plate():
@@ -23,7 +23,7 @@ def flat_row(y=0, depth=-0.508):
 
 def test_constant_depth_capsule_volume_and_round_ends():
     p = small_plate()
-    plate, report = machine_plate([flat_row()], p)
+    plate, report = machine_plate([flat_row()], p, cut_model='cutter-envelope')
     r = p.tool_diameter * MM_PER_INCH / 2
     polygon_area = 32 * r**2 * math.sin(2 * math.pi / 32) / 2
     expected = (6 * 2 * r + polygon_area) * 0.508
@@ -35,6 +35,40 @@ def test_constant_depth_capsule_volume_and_round_ends():
     assert plate.isInside((3.7, 0.7, -0.2))
     assert plate.isInside((0, r + 0.1, -0.2))
     assert plate.isInside((0, 0, -0.6))
+
+
+def test_rectangular_pocket_volume_and_straight_ends():
+    p = small_plate()
+    plate, report = machine_plate([flat_row()], p)
+    width = p.tool_diameter * MM_PER_INCH
+    expected_area = 6 * width
+    assert report['model'] == 'single_spline_rectangular_pocket'
+    assert not report['approximate']
+    assert report['removed_volume_mm3'] == pytest.approx(expected_area * 0.508, abs=1e-5)
+    assert not plate.isInside((2.99, 0.7, -0.2))
+    assert not plate.isInside((-2.99, 0.7, -0.2))
+    # No material is removed past the original spline endpoints.
+    assert plate.isInside((3.01, 0, -0.2))
+    assert plate.isInside((-3.01, 0, -0.2))
+    assert plate.isInside((3.5, 0.5, -0.2))
+    assert plate.isInside((-3.5, 0.5, -0.2))
+
+
+def test_one_spline_floor_is_identical_across_width():
+    p = small_plate()
+    row = interpolate_row([-3, -1, 1, 3], 0, [-0.2, -0.5, -0.3, -0.4], 0.508)
+    plate, report = machine_plate([row], p)
+    width = p.tool_diameter * MM_PER_INCH
+    for x in np.linspace(-2.8, 2.8, 17):
+        z = float(row.polynomial(x))
+        for y in (-width * 0.4, 0, width * 0.4):
+            assert not plate.isInside((x, y, z + 0.0001))
+            assert plate.isInside((x, y, z - 0.0001))
+    expected = -width * row.polynomial.integrate(-3, 3)
+    assert report['removed_volume_mm3'] == pytest.approx(expected, abs=1e-4)
+    # One curved floor and four planar pocket walls.
+    assert len(spline_pocket_volume(row, width).Faces()) == 6
+    assert report['faces'] <= 12
 
 
 def test_radius_envelope_uses_deeper_neighbor_and_analytic_valley():
@@ -102,6 +136,7 @@ def test_default_cli_produces_one_step_and_matching_obj(tmp_path):
     assert len(list(output.glob('*.step'))) == 1
     assert (output / 'machined_plate.obj').exists()
     old_step = (output / 'machined_plate.step').read_bytes()
+    args.cut_model = 'cutter-envelope'
     args.cutter_segments = 7
     with pytest.raises(ValueError, match='Cutter segments'):
         generate(args)
@@ -137,15 +172,14 @@ def test_white_image_uses_minimum_depth_in_finished_exports(tmp_path, min_depth)
     assert 'nan' not in preview.lower()
 
 
-def test_grazing_cut_on_supplied_image_is_a_valid_solid():
-    from pathlib import Path
-
-    source = Path(__file__).resolve().parents[1] / 'image.png'
-    if not source.exists():
-        pytest.skip('Source image is unavailable')
+@pytest.mark.parametrize('cut_model', ['spline-pocket', 'cutter-envelope'])
+def test_grazing_cut_is_a_valid_solid(cut_model):
     p = Parameters(max_depth=0.20)
-    rows = interpolate_grid(sample_image(load_grayscale(source), p), p.max_depth * MM_PER_INCH)
-    plate, report = machine_plate([rows[2]], p)
+    x = np.linspace(-38.1, 38.1, 121)
+    z = np.zeros_like(x)
+    z[57:64] = [0, -0.001, -0.0199, -0.02, -0.0199, -0.001, 0]
+    row = interpolate_row(x, 0, z, p.max_depth * MM_PER_INCH)
+    plate, report = machine_plate([row], p, cut_model=cut_model)
     assert plate.isValid() and len(plate.Solids()) == 1
     assert report['removed_volume_mm3'] > 0
 
@@ -173,4 +207,9 @@ def test_switching_modes_retires_only_previous_generated_geometry(tmp_path):
 ])
 def test_invalid_cut_resolution(settings):
     with pytest.raises(ValueError):
-        machine_plate([flat_row()], small_plate(), **settings)
+        machine_plate([flat_row()], small_plate(), cut_model='cutter-envelope', **settings)
+
+
+def test_unknown_cut_model_is_rejected():
+    with pytest.raises(ValueError, match='Cut model'):
+        machine_plate([flat_row()], small_plate(), cut_model='unknown')
