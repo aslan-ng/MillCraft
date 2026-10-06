@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "millcraft"
+version = "0.1.0"
+description = "Blurred grayscale images to bounded 3D spline centerlines and STEP"
+requires-python = ">=3.9,<3.13"
+dependencies = [
+  "Pillow>=10,<12",
+  "numpy>=1.24,<3",
+  "scipy>=1.10,<1.14",
+  "cadquery==2.5.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+millcraft = "millcraft.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

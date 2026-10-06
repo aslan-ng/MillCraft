@@ -214,5 +214,8 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Generated STEP, depth samples, reports, and previews
+outputs/
+
 # Streamlit
 .streamlit/secrets.toml
